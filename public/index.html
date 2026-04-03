@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Escalas Inteligentes</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Gerenciamento automático de folgas</p>
+        <h1>Escalas inteligentes</h1>
+        <p class="muted">Gere folgas 5x2 e 6x1 com aleatoriedade controlada, sem conflitos por loja / categoria / turno.</p>
+      </div>
+      <div class="actions">
+        <label class="pill">Mês/ano <input id="monthPicker" type="month" /></label>
+        <button id="btnGenerate">Gerar / Regerar</button>
+        <a id="exportLink" class="ghost" href="#" hidden>Exportar CSV</a>
+      </div>
+    </header>
+
+    <section class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Cadastro</p>
+            <h2>Novo funcionário</h2>
+          </div>
+          <span class="muted">Loja + categoria + turno definem o grupo que não pode folgar junto.</span>
+        </div>
+        <div class="grid two">
+          <label>Nome<input id="empName" placeholder="Ex: Ana Silva" /></label>
+          <label>Loja
+            <select id="empStore">
+              <option value="Nescafé">Nescafé</option>
+              <option value="Living Heineken">Living Heineken</option>
+              <option value="Quioque Living">Quioque Living</option>
+              <option value="Forneria">Forneria</option>
+              <option value="Qualycon">Qualycon</option>
+            </select>
+          </label>
+          <label>Categoria
+            <select id="empCategory">
+              <option value="Ar">Ar</option>
+              <option value="Terra">Terra</option>
+            </select>
+          </label>
+          <label>Turno
+            <select id="empShift">
+              <option value="Manhã">Manhã</option>
+              <option value="Tarde">Tarde</option>
+              <option value="Noite">Noite</option>
+            </select>
+          </label>
+          <label>Tipo de escala
+            <select id="empType">
+              <option value="5x2">5x2 (5 trabalho / 2 folga)</option>
+              <option value="6x1">6x1 (6 trabalho / 1 folga)</option>
+            </select>
+          </label>
+        </div>
+        <div class="card-footer">
+          <button id="btnAddEmp">Salvar funcionário</button>
+          <div id="empMsg" class="muted"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Equipe</p>
+            <h2>Funcionários cadastrados</h2>
+          </div>
+          <div class="filters">
+            <select id="filterStore"><option value="">Todas as lojas</option></select>
+            <select id="filterShift"><option value="">Todos os turnos</option></select>
+            <select id="filterType"><option value="">Todos os tipos</option></select>
+          </div>
+        </div>
+        <div class="table" id="empTable"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Visualização</p>
+          <h2>Calendário de folgas</h2>
+        </div>
+        <span class="muted" id="scheduleSummary">Nenhuma escala gerada ainda.</span>
+      </div>
+      <div id="calendar"></div>
+      <div class="legend">
+        <span class="badge badge-off">Folga</span>
+        <span class="badge badge-work">Trabalho</span>
+      </div>
+    </section>
+  </div>
+
+<script>
+const api = (path, opts = {}) => fetch(path, { headers:{'Content-Type':'application/json'}, credentials:'include', ...opts })
+  .then(async r => ({ ok:r.ok, data: await r.json() }))
+  .catch(() => ({ ok:false, data:{ error:'Erro de rede' }}));
+
+const state = { employees: [], schedule:null, days:[], month:null, year:null };
+
+function fmtMonthInput(y, m){
+  return `${y}-${String(m).padStart(2,'0')}`;
+}
+
+function getMonthYearInput(){
+  const val = document.getElementById('monthPicker').value;
+  if (!val) {
+    const now = new Date();
+    return { month: now.getMonth()+1, year: now.getFullYear() };
+  }
+  const [y,m] = val.split('-').map(Number);
+  return { month:m, year:y };
+}
+
+const weekday = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+
+function renderEmployees(){
+  const table = document.getElementById('empTable');
+  const { employees } = state;
+  if (!employees.length){ table.innerHTML = '<p class="muted">Nenhum funcionário cadastrado.</p>'; return; }
+  const head = `<table><thead><tr>
+    <th>Nome</th><th>Loja</th><th>Categoria</th><th>Turno</th><th>Escala</th><th></th>
+  </tr></thead><tbody>`;
+  const rows = employees.map(e => `
+    <tr>
+      <td>${e.name}</td>
+      <td>${e.store}</td>
+      <td>${e.category}</td>
+      <td>${e.shift}</td>
+      <td>${e.schedule_type}</td>
+      <td class="tright"><button class="ghost danger" data-del="${e.id}">Remover</button></td>
+    </tr>`).join('');
+  table.innerHTML = head + rows + '</tbody></table>';
+}
+
+function renderFilters(){
+  const unique = (arr) => Array.from(new Set(arr));
+  const stores = unique(state.employees.map(e=>e.store));
+  const shifts = unique(state.employees.map(e=>e.shift));
+  const types = unique(state.employees.map(e=>e.schedule_type));
+  const fill = (sel, list) => sel.innerHTML = '<option value=\"\">Todos</option>' + list.map(v=>`<option value="${v}">${v}</option>`).join('');
+  fill(document.getElementById('filterStore'), stores);
+  fill(document.getElementById('filterShift'), shifts);
+  fill(document.getElementById('filterType'), types);
+}
+
+function renderCalendar(){
+  const cal = document.getElementById('calendar');
+  const { schedule, days, employees } = state;
+  if (!schedule){ cal.innerHTML = '<p class="muted">Gere uma escala para ver o calendário.</p>'; return; }
+  const totalDays = new Date(schedule.year, schedule.month, 0).getDate();
+  const header = ['Func.', ...Array.from({length:totalDays}, (_,i)=>{
+    const d = i+1;
+    const w = new Date(schedule.year, schedule.month-1, d).getDay();
+    return `${d} ${weekday[w]}`;
+  })];
+  const matrix = [header];
+  const filtered = employees.filter(e => {
+    const fs = document.getElementById('filterStore').value;
+    const ft = document.getElementById('filterShift').value;
+    const ftp = document.getElementById('filterType').value;
+    return (!fs || e.store===fs) && (!ft || e.shift===ft) && (!ftp || e.schedule_type===ftp);
+  });
+  const byEmp = new Map();
+  days.forEach(d => {
+    if(!byEmp.has(d.employee_id)) byEmp.set(d.employee_id, {});
+    byEmp.get(d.employee_id)[d.day] = d.status;
+  });
+  const shortName = (name) => name.length > 16 ? name.slice(0,14) + '…' : name;
+  filtered.forEach(e => {
+    const row = [e.name];
+    for (let d=1; d<=totalDays; d++) {
+      const status = (byEmp.get(e.id) || {})[d] || 'TRABALHO';
+      row.push(status);
+    }
+    matrix.push(row);
+  });
+
+  // build grid
+  cal.style.gridTemplateColumns = `minmax(130px,1.4fr) repeat(${totalDays}, minmax(42px,1fr))`;
+  cal.innerHTML = '';
+  matrix.forEach((row, rIdx) => {
+    row.forEach((cell, cIdx) => {
+      const div = document.createElement('div');
+      div.className = 'cell';
+      if (rIdx === 0) div.classList.add('head');
+      if (cIdx === 0) div.classList.add('sticky');
+      if (cell === 'FOLGA') div.classList.add('off');
+      if (cIdx === 0 && rIdx > 0) {
+        div.textContent = shortName(cell);
+        div.title = cell;
+      } else {
+        div.textContent = cell === 'FOLGA' ? 'F' : cell === 'TRABALHO' ? 'T' : cell;
+      }
+      if (cell === 'FOLGA') div.title = 'Folga';
+      cal.appendChild(div);
+    });
+  });
+  document.getElementById('scheduleSummary').textContent = `Escala ${String(schedule.month).padStart(2,'0')}/${schedule.year} · ${filtered.length} funcionários visíveis`;
+  document.getElementById('exportLink').hidden = false;
+  document.getElementById('exportLink').href = `/api/schedules/${schedule.id}/export?format=csv`;
+}
+
+async function loadEmployees(){
+  const res = await api('/api/employees');
+  if(res.ok){ state.employees = res.data; renderEmployees(); renderFilters(); }
+}
+
+async function loadLatestSchedule(){
+  const res = await api('/api/schedules/latest');
+  if(res.ok && res.data.schedule){
+    state.schedule = res.data.schedule;
+    state.days = res.data.days;
+    state.employees = res.data.employees;
+    const mm = fmtMonthInput(state.schedule.year, state.schedule.month);
+    document.getElementById('monthPicker').value = mm;
+  }
+  renderEmployees(); renderFilters(); renderCalendar();
+}
+
+async function regenerateCurrentMonth(){
+  const { month, year } = getMonthYearInput();
+  const res = await api('/api/schedules/generate', { method:'POST', body: JSON.stringify({ month, year }) });
+  if(!res.ok){ alert(res.data.error || 'Erro ao gerar'); return false; }
+  await loadLatestSchedule();
+  renderCalendar();
+  return true;
+}
+
+async function generateIfMissing(){
+  if (state.schedule) return;
+  if (!state.employees.length) return;
+  const { month, year } = getMonthYearInput();
+  const res = await api('/api/schedules/generate', { method:'POST', body: JSON.stringify({ month, year }) });
+  if(res.ok) await loadLatestSchedule();
+}
+
+btnAddEmp.onclick = async () => {
+  const payload = {
+    name: empName.value.trim(),
+    store: empStore.value,
+    category: empCategory.value,
+    shift: empShift.value,
+    schedule_type: empType.value,
+  };
+  const res = await api('/api/employees', { method:'POST', body: JSON.stringify(payload) });
+  empMsg.textContent = res.data.error || 'Salvo!';
+  if(res.ok) {
+    empName.value='';
+    await loadEmployees();
+    await regenerateCurrentMonth();
+  }
+};
+
+btnGenerate.onclick = async () => {
+  btnGenerate.disabled = true;
+  btnGenerate.textContent = 'Gerando...';
+  await regenerateCurrentMonth();
+  btnGenerate.disabled = false;
+  btnGenerate.textContent = 'Gerar / Regerar';
+};
+
+monthPicker.onchange = () => {
+  // visual only
+};
+
+empTable.addEventListener('click', async (e) => {
+  if (e.target.dataset.del){
+    if(!confirm('Remover funcionário?')) return;
+    await api(`/api/employees/${e.target.dataset.del}`, { method:'DELETE' });
+    await loadEmployees();
+    await loadLatestSchedule();
+  }
+});
+
+['filterStore','filterShift','filterType'].forEach(id => {
+  document.getElementById(id).onchange = renderCalendar;
+});
+
+(async function init(){
+  const now = new Date();
+  monthPicker.value = fmtMonthInput(now.getFullYear(), now.getMonth()+1);
+  await loadEmployees();
+  await loadLatestSchedule();
+  await generateIfMissing();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agendar consulta</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="layout narrow">
+    <header>
+      <div>
+        <h1>Agende sua consulta</h1>
+        <p>Escolha o(a) profissional e informe seus dados.</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <div id="inviteInfo" class="muted"></div>
+      <div class="grid two">
+        <label>Seu nome<input id="ptName" /></label>
+        <label>Email<input id="ptEmail" type="email" /></label>
+        <label>WhatsApp<input id="ptPhone" /></label>
+        <label>Profissional<select id="doctor"></select></label>
+        <label>Data e hora<input id="when" type="datetime-local" /></label>
+      </div>
+      <button id="btnBook">Confirmar agendamento</button>
+      <div id="result" class="muted"></div>
+    </section>
+  </div>
+
+<script>
+const token = window.location.pathname.split('/').pop();
+const api = (path, opts={}) => fetch(path, {headers:{'Content-Type':'application/json'}, ...opts}).then(r=>r.json());
+
+async function loadInvite(){
+  const res = await api(`/api/invites/${token}`);
+  if(res.error){ result.textContent = res.error; btnBook.disabled = true; return; }
+  inviteInfo.textContent = `Convite para: ${res.invite.patient_name || 'Paciente'}`;
+}
+async function loadDoctors(){
+  const list = await api('/api/doctors');
+  doctor.innerHTML = list.map(d=>`<option value="${d.id}">${d.name}</option>`).join('');
+}
+btnBook.onclick = async ()=>{
+  const payload = {
+    token,
+    patient_name: ptName.value.trim(),
+    patient_email: ptEmail.value.trim(),
+    patient_phone: ptPhone.value.trim(),
+    doctor_id: doctor.value,
+    scheduled_at: when.value
+  };
+  const res = await api('/api/appointments',{method:'POST',body:JSON.stringify(payload)});
+  result.textContent = res.error ? res.error : 'Consulta agendada com sucesso!';
+  if(!res.error) btnBook.disabled = true;
+};
+loadInvite();
+loadDoctors();
+</script>
+</body>
+</html>
