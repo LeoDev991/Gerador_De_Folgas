@@ -462,14 +462,45 @@ app.post('/api/schedules/generate', (req, res) => {
     }
 
     db.serialize(() => {
-      db.run('INSERT INTO schedules (month, year) VALUES (?,?)', [m, y], function (err2) {
-        if (err2) return res.status(500).json({ error: 'Erro ao salvar escala' });
-        const scheduleId = this.lastID;
-        const stmt = db.prepare('INSERT INTO schedule_days (schedule_id, employee_id, day, status) VALUES (?,?,?,?)');
-        for (const row of scheduleRows) stmt.run(scheduleId, row.employee_id, row.day, row.status);
-        stmt.finalize();
-        res.json({ schedule_id: scheduleId });
-      });
+        db.run('INSERT INTO schedules (month, year) VALUES (?,?)', [m, y], function (err2) {
+          if (err2) return res.status(500).json({ error: 'Erro ao salvar escala' });
+          const scheduleId = this.lastID;
+          const stmt = db.prepare('INSERT INTO schedule_days (schedule_id, employee_id, day, status) VALUES (?,?,?,?)');
+
+          // Aguarda todos os inserts terminarem antes de responder ao cliente.
+          let remaining = scheduleRows.length;
+          let responded = false;
+
+          if (remaining === 0) {
+            // nenhum dia para inserir (improvável), mas finaliza corretamente
+            stmt.finalize((err3) => {
+              if (err3) return res.status(500).json({ error: 'Erro ao salvar escala' });
+              return res.json({ schedule_id: scheduleId });
+            });
+            return;
+          }
+
+          scheduleRows.forEach((row) => {
+            stmt.run(scheduleId, row.employee_id, row.day, row.status, (err3) => {
+              if (err3 && !responded) {
+                responded = true;
+                // finalize e retorne erro
+                stmt.finalize(() => {
+                  return res.status(500).json({ error: 'Erro ao salvar dias da escala' });
+                });
+                return;
+              }
+              remaining--;
+              if (remaining === 0 && !responded) {
+                // todos os inserts completaram, finalize e responda
+                stmt.finalize((err4) => {
+                  if (err4) return res.status(500).json({ error: 'Erro ao finalizar gravação' });
+                  return res.json({ schedule_id: scheduleId });
+                });
+              }
+            });
+          });
+        });
     });
   });
 });
