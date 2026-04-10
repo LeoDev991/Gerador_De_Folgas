@@ -148,6 +148,67 @@ function trimToMaxTwoConsecutive(offSet) {
   }
 }
 
+// Utility to ensure adding a day won't create >2 consecutive offs
+function wouldCreateThreeConsecutive(offSet, day) {
+  // check neighbors after adding day
+  const has = d => offSet.has(d) || d === day;
+  // if there exists sequence x, x+1, x+2 all true then it's bad
+  for (let start = day - 2; start <= day; start++) {
+    if (start >= 1) {
+      if (has(start) && has(start + 1) && has(start + 2)) return true;
+    }
+  }
+  return false;
+}
+
+function hasAnyConsecutive(offSet) {
+  for (const d of offSet) {
+    if (offSet.has(d + 1)) return true;
+  }
+  return false;
+}
+
+function resolveConsecutiveFor6x1(offSet, totalDays, keyPrefix, existingOffMap) {
+  // Try to resolve any adjacent pairs by moving one of the days to a nearby safe slot.
+  const arr = Array.from(offSet).sort((a, b) => a - b);
+  for (let i = 0; i < arr.length; i++) {
+    const d = arr[i];
+    if (!offSet.has(d + 1)) continue;
+    const a = d, b = d + 1;
+
+    const tryMove = (from, directions) => {
+      for (const dir of directions) {
+        for (let shift = 1; shift <= totalDays; shift++) {
+          const target = from + dir * shift;
+          if (target < 1 || target > totalDays) break;
+          const key = `${keyPrefix}-${target}`;
+          if (existingOffMap.has(key)) continue;
+          if (offSet.has(target)) continue;
+          // ensure moving doesn't create 3-consecutive or adjacent pair
+          const temp = new Set(offSet);
+          temp.delete(from);
+          temp.add(target);
+          if (hasAnyConsecutive(temp)) continue;
+          if (wouldCreateThreeConsecutive(temp, target)) continue;
+          // good: perform move
+          offSet.delete(from);
+          offSet.add(target);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // Prefer moving the latter (b) forward, then backward, then try moving a
+    if (tryMove(b, [1, -1])) continue;
+    if (tryMove(a, [-1, 1])) continue;
+
+    // if cannot move either, fail resolution
+    return false;
+  }
+  return true;
+}
+
 function exceedsMaxWorkStreak(offSet, totalDays, maxWork) {
   let streak = 0;
   for (let day = 1; day <= totalDays; day++) {
@@ -176,6 +237,8 @@ function enforceMaxWorkStreak(offSet, totalDays, maxWork, keyPrefix, existingOff
         const targetDay = day + shift;
         const key = `${keyPrefix}-${targetDay}`;
         if (!offSet.has(targetDay) && !existingOffMap.has(key)) {
+          // ensure adding targetDay won't create 3 consecutive offs
+          if (wouldCreateThreeConsecutive(offSet, targetDay)) continue;
           offSet.add(targetDay);
           existingOffMap.add(key);
           placed = true;
@@ -304,6 +367,16 @@ function buildEmployeeOffDays(emp, month, year, existingOffMap, maxAttempts = 40
     }
     enforceMaxWorkStreak(off, totalDays, maxWork, keyPrefix, existingOffMap);
 
+    // for 6x1, ensure there are no consecutive folgas (never 2 dias seguidos)
+    if (emp.schedule_type === '6x1') {
+      if (hasAnyConsecutive(off)) {
+        if (!resolveConsecutiveFor6x1(off, totalDays, keyPrefix, existingOffMap)) {
+          // couldn't resolve; try next attempt
+          continue;
+        }
+      }
+    }
+
     if (!validateConstraints(off, totalDays, maxWork)) continue;
     if (!meetsMinimumOff(off, emp.schedule_type, totalDays)) continue;
     if (hasConflict(off, keyPrefix, existingOffMap)) {
@@ -315,6 +388,37 @@ function buildEmployeeOffDays(emp, month, year, existingOffMap, maxAttempts = 40
     }
 
     // commit
+    // ensure no 3 consecutive after commit and at least 1 off
+    trimToMaxTwoConsecutive(off);
+    if (off.size === 0) {
+      // try to add a safe day without creating 3 consecutive
+      const tryAddSafe = (d) => {
+        if (d < 1 || d > totalDays) return false;
+        const key = `${keyPrefix}-${d}`;
+        if (existingOffMap.has(key)) return false;
+        if (wouldCreateThreeConsecutive(off, d)) return false;
+        off.add(d);
+        return true;
+      };
+      // prefer sundays / weekend pairs
+      if (emp.schedule_type === '6x1') {
+        for (let d=1; d<=totalDays; d++) {
+          if (new Date(year, month-1, d).getDay() === 0 && tryAddSafe(d)) break;
+        }
+      } else {
+        const pairs = listWeekends(month, year);
+        if (pairs.length) {
+          if (tryAddSafe(pairs[0].sat)) tryAddSafe(pairs[0].sun);
+        }
+      }
+      if (off.size === 0) tryAddSafe(1);
+
+    }
+
+    // final trim and validate
+    trimToMaxTwoConsecutive(off);
+    if (!validateConstraints(off, totalDays, maxWork)) continue;
+    if (!meetsMinimumOff(off, emp.schedule_type, totalDays)) continue;
     for (const d of off) existingOffMap.add(`${keyPrefix}-${d}`);
     return off;
   }
@@ -354,6 +458,15 @@ function buildEmployeeOffDays(emp, month, year, existingOffMap, maxAttempts = 40
   }
 
   // still ensure conflicts avoided and constraints ok
+  // Ensure at least one off and no three consecutive
+  if (off.size === 0) {
+    // try to add a safe day
+    for (let d = 1; d <= totalDays; d++) {
+      const key = `${keyPrefix}-${d}`;
+      if (!existingOffMap.has(key) && !wouldCreateThreeConsecutive(off, d)) { off.add(d); break; }
+    }
+  }
+  trimToMaxTwoConsecutive(off);
   if (!meetsMinimumOff(off, emp.schedule_type, totalDays)) return new Set();
   if (!validateConstraints(off, totalDays, maxWork)) return new Set();
   for (const d of off) existingOffMap.add(`${keyPrefix}-${d}`);
@@ -394,7 +507,11 @@ app.post('/api/employees', (req, res) => {
         VALUES (?,?,?,?,?)`);
       stmt.run(name.trim(), store, category, shift, schedule_type, function (err2) {
         if (err2) return res.status(500).json({ error: 'Erro ao salvar' });
-        res.json({ id: this.lastID });
+        // Retornar o funcionário recém-criado para o cliente atualizar a UI imediatamente
+        db.get('SELECT * FROM employees WHERE id = ?', [this.lastID], (err3, row) => {
+          if (err3) return res.status(500).json({ error: 'Erro ao recuperar funcionário' });
+          res.json(row);
+        });
       });
     }
   );
@@ -419,8 +536,10 @@ app.post('/api/schedules/generate', (req, res) => {
     if (!employees.length) return res.status(400).json({ error: 'Cadastre funcionários antes de gerar' });
 
     const totalDays = daysInMonth(m, y);
-    let scheduleRows = null;
+  let scheduleRows = null;
     const maxGlobalAttempts = 200;
+  const failedEmployees = [];
+  let usedFallback = false;
 
     for (let attempt = 0; attempt < maxGlobalAttempts; attempt++) {
       const existingOffMap = new Set();
@@ -430,7 +549,13 @@ app.post('/api/schedules/generate', (req, res) => {
 
       for (const emp of ordered) {
         const offDays = buildEmployeeOffDays(emp, m, y, existingOffMap);
-        if (offDays.size === 0) { failed = true; break; }
+        if (offDays.size === 0) {
+          failed = true;
+          // log which employee failed in this attempt for later inspection
+          console.warn(`Geração: falha ao gerar folgas para funcionário ${emp.name} (id=${emp.id}, loja=${emp.store}, turno=${emp.shift}) na tentativa ${attempt+1}`);
+          failedEmployees.push({ id: emp.id, name: emp.name, store: emp.store, shift: emp.shift });
+          break;
+        }
         for (let d = 1; d <= totalDays; d++) {
           rows.push({ employee_id: emp.id, day: d, status: offDays.has(d) ? 'FOLGA' : 'TRABALHO' });
         }
@@ -441,6 +566,7 @@ app.post('/api/schedules/generate', (req, res) => {
 
     // fallback muito relaxado: se ainda assim não gerou, crie sem considerar conflitos, priorizando folgas mínimas
     if (!scheduleRows) {
+      usedFallback = true;
       const rows = [];
       employees.forEach((emp) => {
         const maxWork = emp.schedule_type === '6x1' ? 6 : 5;
@@ -449,11 +575,41 @@ app.post('/api/schedules/generate', (req, res) => {
           : generate6x1Schedule(totalDays, m, y);
         trimToMaxTwoConsecutive(off);
         enforceMaxWorkStreak(off, totalDays, maxWork, '', new Set());
-        // se ainda não bater mínimo, completa de forma gulosa
+        // se ainda não bater mínimo, completa de forma gulosa (respeitando 6x1 sem dias consecutivos)
         for (let d = 1; d <= totalDays && !meetsMinimumOff(off, emp.schedule_type, totalDays); d++) {
+          if (emp.schedule_type === '6x1') {
+            // não adicionar se criaria dois dias seguidos
+            if (off.has(d - 1) || off.has(d + 1)) continue;
+            if (wouldCreateThreeConsecutive(off, d)) continue;
+          }
           off.add(d);
           trimToMaxTwoConsecutive(off);
         }
+        // Garantia adicional: pelo menos 1 folga por funcionário (caso extremo)
+        if (off.size === 0) {
+          // preferir domingos (6x1) ou primeiro final de semana (5x2), senão dia 1
+          if (emp.schedule_type === '6x1') {
+            for (let d = 1; d <= totalDays; d++) {
+              if (new Date(y, m-1, d).getDay() === 0) { off.add(d); break; }
+            }
+          } else {
+            // 5x2: try to add first saturday/sunday pair
+            const pairs = listWeekends(m, y);
+            if (pairs.length) { off.add(pairs[0].sat); off.add(pairs[0].sun); }
+          }
+          if (off.size === 0) off.add(1);
+        }
+        // For 6x1: if any consecutive pair remains or minimum not met, prefer sundays (não consecutivos)
+        if (emp.schedule_type === '6x1') {
+          if (hasAnyConsecutive(off) || off.size === 0 || !meetsMinimumOff(off, emp.schedule_type, totalDays)) {
+            const newOff = new Set();
+            for (let d = 1; d <= totalDays; d++) if (new Date(y, m-1, d).getDay() === 0) newOff.add(d);
+            // fill further spaced days if needed (every 7 days starting at 1)
+            for (let d = 1; d <= totalDays && !meetsMinimumOff(newOff, emp.schedule_type, totalDays); d += 7) newOff.add(d);
+            off = newOff;
+          }
+        }
+
         for (let d = 1; d <= totalDays; d++) {
           rows.push({ employee_id: emp.id, day: d, status: off.has(d) ? 'FOLGA' : 'TRABALHO' });
         }
@@ -475,7 +631,11 @@ app.post('/api/schedules/generate', (req, res) => {
             // nenhum dia para inserir (improvável), mas finaliza corretamente
             stmt.finalize((err3) => {
               if (err3) return res.status(500).json({ error: 'Erro ao salvar escala' });
-              return res.json({ schedule_id: scheduleId });
+              // enviar lista única de funcionários com falha (por id)
+              const uniqueFailed = Array.from(new Map(failedEmployees.map(f => [f.id, f])).values());
+              const respObj = { schedule_id: scheduleId, used_fallback: usedFallback, failed_employees: uniqueFailed };
+              console.log('Respondendo geração:', JSON.stringify(respObj));
+              return res.json(respObj);
             });
             return;
           }
@@ -492,12 +652,15 @@ app.post('/api/schedules/generate', (req, res) => {
               }
               remaining--;
               if (remaining === 0 && !responded) {
-                // todos os inserts completaram, finalize e responda
-                stmt.finalize((err4) => {
-                  if (err4) return res.status(500).json({ error: 'Erro ao finalizar gravação' });
-                  return res.json({ schedule_id: scheduleId });
-                });
-              }
+                    // todos os inserts completaram, finalize e responda
+                    stmt.finalize((err4) => {
+                      if (err4) return res.status(500).json({ error: 'Erro ao finalizar gravação' });
+                      const uniqueFailed = Array.from(new Map(failedEmployees.map(f => [f.id, f])).values());
+                      const respObj = { schedule_id: scheduleId, used_fallback: usedFallback, failed_employees: uniqueFailed };
+                      console.log('Respondendo geração:', JSON.stringify(respObj));
+                      return res.json(respObj);
+                    });
+                  }
             });
           });
         });

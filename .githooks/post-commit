@@ -1,0 +1,8 @@
+#!/bin/sh
+# Post-commit hook: update changelog and stage it for inclusion in the next commit
+# This script intentionally stages the changelog rather than creating a new commit.
+NODE_CMD="node ./scripts/update-changelog.js"
+if command -v node >/dev/null 2>&1; then
+  $NODE_CMD || exit 0
+  git add CHANGELOG_GERACAO.md >/dev/null 2>&1 || true
+fi
